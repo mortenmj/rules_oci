@@ -18,6 +18,7 @@ docker run --rm my-repository:latest
 ```
 """
 
+load("@aspect_bazel_lib//lib:tar.bzl", "tar_lib")
 load("//oci/private:util.bzl", "util")
 
 doc = """Creates tarball from OCI layouts that can be loaded into docker daemon without needing to publish the image first.
@@ -56,70 +57,98 @@ attrs = {
         executable = True,
         cfg = "target",
     ),
-    "_run_template": attr.label(
-        default = Label("//oci/private:tarball_run.sh.tpl"),
-        doc = """ \
-              The template used to load the container when using `bazel run` on this oci_tarball.
-              
-              See the `loader` attribute to replace the tool which is called.
-              Please reference the default template to see available substitutions. 
-        """,
-        allow_single_file = True,
-    ),
     "_tarball_sh": attr.label(allow_single_file = True, default = "//oci/private:tarball.sh.tpl"),
     "_windows_constraint": attr.label(default = "@platforms//os:windows"),
 }
 
-def _tarball_impl(ctx):
-    image = ctx.file.image
-    tarball = ctx.actions.declare_file("{}/tarball.tar".format(ctx.label.name))
-    yq_bin = ctx.toolchains["@aspect_bazel_lib//lib:yq_toolchain_type"].yqinfo.bin
-    executable = ctx.actions.declare_file("{}/tarball.sh".format(ctx.label.name))
-    repo_tags = ctx.file.repo_tags
 
-    substitutions = {
-        "{{format}}": ctx.attr.format,
-        "{{yq}}": yq_bin.path,
-        "{{image_dir}}": image.path,
-        "{{tarball_path}}": tarball.path,
-    }
+def _mtree_line(dest, type, content = None, uid = "0", gid = "0", time = "0.0", mode = "0755"):
+    # mtree expects paths to start with ./ so normalize paths that starts with
+    # `/` or relative path (without / and ./)
+    if not dest.startswith("."):
+        if not dest.startswith("/"):
+            dest = "/" + dest
+        dest = "." + dest
+    spec = [
+        dest,
+        "uid=" + uid,
+        "gid=" + gid,
+        "time=" + time,
+        "mode=" + mode,
+        "type=" + type,
+    ]
+    if content:
+        spec.append("content=" + content)
+    return " ".join(spec)
 
-    if ctx.attr.repo_tags:
-        substitutions["{{tags}}"] = repo_tags.path
+def _expand(file, expander):
+    expanded = expander.expand(file)
+    lines = []
+    for e in expanded:
+        path = e.tree_relative_path
+        segments = path.split("/")
+        for i in range(1, len(segments)):
+            parent = "/".join(segments[:i])
+            lines.append(_mtree_line(parent, "dir"))
+        if path.startswith("blobs/"):
+            path += ".tar.gz"
+        lines.append(_mtree_line(path, "file", content = e.short_path))
+    return lines
 
+def _create_executable(ctx, type, output, mtree, jq, bsdtar, transform):
+    executable = ctx.actions.declare_file("%s_%s.sh" % (ctx.attr.name, type))
     ctx.actions.expand_template(
         template = ctx.file._tarball_sh,
         output = executable,
         is_executable = True,
-        substitutions = substitutions,
+        substitutions = {
+            "{{bsdtar}}": transform(bsdtar),
+            "{{jq}}": transform(jq),
+            "{{image}}": transform(ctx.file.image),
+            "{{mtree}}": transform(mtree),
+            "{{tags}}": transform(ctx.file.repo_tags),
+            "{{output}}": output
+        },
     )
+    return executable
 
+def _tarball_impl(ctx):
+    bsdtar = ctx.toolchains[tar_lib.toolchain_type].tarinfo.binary
+    jq = ctx.toolchains["@aspect_bazel_lib//lib:jq_toolchain_type"].jqinfo.bin
+
+    # Mtree
+    mtree = ctx.actions.declare_file(ctx.attr.name + ".spec")
+    content = ctx.actions.args()
+    content.set_param_file_format("multiline")
+    content.add("#mtree")
+    content.add_all(
+        ctx.files.image,
+        map_each = _expand,
+        expand_directories = True,
+        uniquify = True,
+    )
+    ctx.actions.write(mtree, content = content)
+
+    create_executable_kwargs = dict(bsdtar = bsdtar, jq = jq, mtree = mtree)
+
+    # Expensive tarball action.
+    executable = _create_executable(ctx, type = "action", transform = lambda x: x.path, **create_executable_kwargs)
+    tarball = ctx.actions.declare_file("{}/tarball.tar".format(ctx.label.name))
     ctx.actions.run(
         executable = util.maybe_wrap_launcher_for_windows(ctx, executable),
-        inputs = [image, repo_tags, executable],
+        inputs = [ctx.file.image, ctx.file.repo_tags, executable],
         outputs = [tarball],
-        tools = [yq_bin],
+        tools = [jq],
         mnemonic = "OCITarball",
-        progress_message = "OCI Tarball %{label}",
+        progress_message = "OCI Tarball %{label}"
     )
 
-    exe = ctx.actions.declare_file(ctx.label.name + ".sh")
-
-    ctx.actions.expand_template(
-        template = ctx.file._run_template,
-        output = exe,
-        substitutions = {
-            "{{image_path}}": tarball.short_path,
-            "{{loader}}": ctx.file.loader.path if ctx.file.loader else "",
-        },
-        is_executable = True,
-    )
-    runfiles = [tarball]
-    if ctx.file.loader:
-        runfiles.append(ctx.file.loader)
+    executable = _create_executable(ctx, type = "run", transform = lambda x: x.short_path, **create_executable_kwargs)
+    runfiles = ctx.runfiles(files = [jq, bsdtar, mtree, ctx.file.image, ctx.file.repo_tags] + ctx.files.loader)
 
     return [
-        DefaultInfo(files = depset([tarball]), runfiles = ctx.runfiles(files = runfiles), executable = exe),
+        DefaultInfo(files = depset([]), runfiles = runfiles, executable = executable),
+        OutputGroupInfo(tarball = depset([tarball]))
     ]
 
 oci_tarball = rule(
@@ -127,8 +156,9 @@ oci_tarball = rule(
     attrs = attrs,
     doc = doc,
     toolchains = [
+        tar_lib.toolchain_type,
         "@bazel_tools//tools/sh:toolchain_type",
-        "@aspect_bazel_lib//lib:yq_toolchain_type",
+        "@aspect_bazel_lib//lib:jq_toolchain_type",
     ],
     executable = True,
 )
