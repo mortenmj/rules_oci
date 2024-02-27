@@ -35,12 +35,12 @@ _IMAGE_REFERENCE_ATTRS = {
     ),
 }
 
-SCHEMA1_ERROR="""\
+SCHEMA1_ERROR = """\
 Registry responded with a manifest that has `schemaVersion=1`
 Usually happens when fetching from a registry that requires `Docker-Distribution-API-Version` header to be set
 """
 
-OCI_MEDIA_TYPE_OR_AUTHN_ERROR="""\
+OCI_MEDIA_TYPE_OR_AUTHN_ERROR = """\
 Could not fetch the manifest. Either there was an authentication issue or trying to pull an image with OCI image media types.
 """
 
@@ -133,6 +133,7 @@ def _download_manifest(rctx, authn, identifier, output):
             util.warning(rctx, explanation)
 
     if fallback_to_curl:
+        fail("ON NOES!")
         util.warning(rctx, "Falling back to using `curl`. See https://github.com/bazelbuild/bazel/issues/17829 for the context.")
         _download(
             rctx,
@@ -144,7 +145,7 @@ def _download_manifest(rctx, authn, identifier, output):
             headers = {
                 "Accept": ",".join(_SUPPORTED_MEDIA_TYPES["index"] + _SUPPORTED_MEDIA_TYPES["manifest"]),
                 "Docker-Distribution-API-Version": "registry/2.0",
-            }
+            },
         )
         bytes = rctx.read(output)
         manifest = json.decode(bytes)
@@ -216,6 +217,7 @@ def _oci_pull_impl(rctx):
                 rctx.attr.repository,
                 rctx.attr.platform,
             ))
+
         manifest, size, digest = downloader.download_manifest(matching_manifest["digest"], "manifest.json")
     else:
         fail("Unrecognized mediaType {} in manifest file".format(manifest["mediaType"]))
@@ -247,7 +249,7 @@ def _oci_pull_impl(rctx):
     rctx.file("oci-layout", json.encode_indent({"imageLayoutVersion": "1.0.0"}, indent = "    "))
 
     rctx.file("BUILD.bazel", content = _BUILD_FILE_TMPL.format(
-        target_name = rctx.attr.target_name
+        target_name = rctx.attr.target_name,
     ))
 
 oci_pull = repository_rule(
@@ -264,7 +266,7 @@ oci_pull = repository_rule(
             ),
         },
     ),
-    environ = authn.ENVIRON
+    environ = authn.ENVIRON,
 )
 
 _MULTI_PLATFORM_IMAGE_ALIAS_TMPL = """\
@@ -384,5 +386,5 @@ oci_alias = repository_rule(
             ),
         },
     ),
-    environ = authn.ENVIRON
+    environ = authn.ENVIRON,
 )
