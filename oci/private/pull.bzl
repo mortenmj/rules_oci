@@ -115,41 +115,11 @@ def _download_manifest(rctx, authn, identifier, output):
     manifest = None
     digest = None
 
-    result = _download(rctx, authn, identifier, output, "manifests", allow_fail = True)
+    result = _download(rctx, authn, identifier, output, "manifests")
 
-    fallback_to_curl = False
-    if result.success:
-        bytes = rctx.read(output)
-        manifest = json.decode(bytes)
-        digest = "sha256:{}".format(result.sha256)
-        if manifest["schemaVersion"] == 1:
-            fallback_to_curl = True
-            util.warning(rctx, SCHEMA1_ERROR)
-    else:
-        fallback_to_curl = True
-        util.warning(rctx, OCI_MEDIA_TYPE_OR_AUTHN_ERROR)
-        explanation = authn.explain()
-        if explanation:
-            util.warning(rctx, explanation)
-
-    if fallback_to_curl:
-        fail("ON NOES!")
-        util.warning(rctx, "Falling back to using `curl`. See https://github.com/bazelbuild/bazel/issues/17829 for the context.")
-        _download(
-            rctx,
-            authn,
-            identifier,
-            output,
-            "manifests",
-            download.curl,
-            headers = {
-                "Accept": ",".join(_SUPPORTED_MEDIA_TYPES["index"] + _SUPPORTED_MEDIA_TYPES["manifest"]),
-                "Docker-Distribution-API-Version": "registry/2.0",
-            },
-        )
-        bytes = rctx.read(output)
-        manifest = json.decode(bytes)
-        digest = "sha256:{}".format(util.sha256(rctx, output))
+    bytes = rctx.read(output)
+    manifest = json.decode(bytes)
+    digest = "sha256:{}".format(result.sha256)
 
     return manifest, len(bytes), digest
 
@@ -222,9 +192,8 @@ def _oci_pull_impl(rctx):
     else:
         fail("Unrecognized mediaType {} in manifest file".format(manifest["mediaType"]))
 
-    # symlink manifest.json to blobs with its digest.
-    # it is okay to use symlink here as copy_to_directory will dereference it when creating the TreeArtifact.
-    rctx.symlink("manifest.json", _digest_into_blob_path(digest))
+    # copy manifest.json to blobs with its digest.
+    rctx.template(_digest_into_blob_path(digest), "manifest.json")
 
     config_output_path = _digest_into_blob_path(manifest["config"]["digest"])
     downloader.download_blob(manifest["config"]["digest"], config_output_path)
